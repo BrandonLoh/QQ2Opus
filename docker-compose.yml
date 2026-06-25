@@ -1,0 +1,41 @@
+version: "3.8"
+
+services:
+  qq2opus:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PUID: ${PUID:-1000}
+        PGID: ${PGID:-1000}
+    container_name: qq2opus
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # ── Required: go-music-api address ───────────────────────
+      - GO_MUSIC_API_BASE=${GO_MUSIC_API_BASE:-http://192.168.1.50:8080}
+
+      # ── Optional: NAS file permission ────────────────────────
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+
+      # ── Optional: local playlist name → ID mapping (JSON) ────
+      # Example: '{"我喜欢的音乐":"123456","睡前轻音乐":"789012"}'
+      - PLAYLIST_NAME_MAP=${PLAYLIST_NAME_MAP:-}
+
+      # ── Optional: tune buffer size (default 4096) ────────────
+      - CHUNK_SIZE=${CHUNK_SIZE:-4096}
+
+    volumes:
+      # Persistent cache for transcoded .opus files
+      - ./cache:/cache
+
+    # Health check every 60s
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

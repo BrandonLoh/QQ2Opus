@@ -1,0 +1,360 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "QQ2Opus — NAS Audio Streaming for ESP32-S3",
+    "version": "2.0.0",
+    "description": "单声道 Opus 音频推流服务端，与 go-music-api 联动，为 ESP32-S3 智能音箱提供歌单管理、模糊搜索、插播、自然切歌。"
+  },
+  "servers": [
+    {
+      "url": "http://192.168.1.100:8000",
+      "description": "群晖 NAS Docker"
+    }
+  ],
+  "tags": [
+    { "name": "Playlist", "description": "歌单设置与切歌控制" },
+    { "name": "Streaming", "description": "音频推流（音箱 DONE 事件驱动自然切歌）" },
+    { "name": "Query", "description": "状态查询与元数据" },
+    { "name": "Health", "description": "健康检查" }
+  ],
+
+  "paths": {
+    "/api/set_playlist": {
+      "post": {
+        "tags": ["Playlist"],
+        "summary": "设置/覆盖播放队列",
+        "description": "支持四种输入模式：song_ids 列表、playlist_id、playlist_name 模糊搜索、song_name 单曲点歌。\n内部自动调用 go-music-api 解析为 song_id 列表并持久化，同时预加载前两首。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "四种模式四选一。若提供 playlist_id，可附带可选的 source 字段指定平台。",
+                "properties": {
+                  "song_ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "模式一：直接传入歌曲 ID 列表"
+                  },
+                  "playlist_id": {
+                    "type": "string",
+                    "description": "模式二：歌单 ID（可附加 source 指定平台：qq/netesae/kuwo/kugou/migu，缺省时自动猜测，qq 优先）"
+                  },
+                  "source": {
+                    "type": "string",
+                    "description": "仅配合 playlist_id 使用，指定平台来源（qq/netesae/kuwo/kugou/migu）"
+                  },
+                  "playlist_name": {
+                    "type": "string",
+                    "description": "模式三：歌单名称，通过 go-music-api 模糊搜索匹配"
+                  },
+                  "song_name": {
+                    "type": "string",
+                    "description": "模式四：单曲名称，通过 go-music-api 搜索第一匹配项，包装为单曲歌单"
+                  }
+                }
+              },
+              "examples": {
+                "by_song_ids": { "summary": "模式一：ID 列表", "value": { "song_ids": ["228908", "001"] } },
+                "by_playlist_id": { "summary": "模式二：歌单 ID + 平台", "value": { "playlist_id": "433808707", "source": "netease" } },
+                "by_playlist_id_guess": { "summary": "模式二：歌单 ID（自动猜测平台）", "value": { "playlist_id": "433808707" } },
+                "by_playlist_name": { "summary": "模式三：歌单名模糊搜索", "value": { "playlist_name": "我喜欢的音乐" } },
+                "by_song_name": { "summary": "模式四：单曲点歌", "value": { "song_name": "周杰伦 晴天" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "歌单更新成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string", "example": "Playlist updated" },
+                    "count": { "type": "integer", "example": 100 }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "参数缺失", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "404": { "description": "歌曲/歌单未找到", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+
+    "/api/insert_song": {
+      "post": {
+        "tags": ["Playlist"],
+        "summary": "插播歌曲（插入到当前播放位置之后）",
+        "description": "在 current_index + 1 处插入一首歌，同时后台预加载转码。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "song_id": { "type": "string", "description": "歌曲 ID" },
+                  "song_name": { "type": "string", "description": "歌曲名称（模糊搜索）" }
+                }
+              },
+              "examples": {
+                "by_id": { "summary": "ID 插播", "value": { "song_id": "228908" } },
+                "by_name": { "summary": "歌名插播", "value": { "song_name": "陈奕迅 十年" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "插播成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string", "example": "Song inserted" },
+                    "song_id": { "type": "string", "example": "228908" },
+                    "position": { "type": "integer", "example": 1 }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "参数缺失", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "404": { "description": "歌曲未找到", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+
+    "/api/recommend_playlists": {
+      "get": {
+        "tags": ["Playlist"],
+        "summary": "获取推荐歌单（给音箱展示候选列表）",
+        "description": "对接 go-music-api 原生推荐接口，按平台过滤。\nAPI 不可达时回退到本地预设歌单。\n音箱获取列表后，用户选中某个歌单，再用 POST /api/set_playlist 设置播放。",
+        "parameters": [
+          {
+            "name": "source",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "enum": ["qq", "netease", "kuwo", "kugou", "migu"] },
+            "description": "平台过滤，留空则混合返回"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "default": 20, "minimum": 1, "maximum": 50 },
+            "description": "返回数量上限"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "推荐歌单列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "playlists": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": { "type": "string", "example": "8075336924" },
+                          "name": { "type": "string", "example": "90后回忆 | MP3时代的流行歌曲" },
+                          "source": { "type": "string", "example": "qq" },
+                          "cover": { "type": "string", "example": "https://qpic.y.qq.com/..." },
+                          "track_count": { "type": "integer", "example": 511 },
+                          "play_count": { "type": "integer", "example": 143980865 },
+                          "creator": { "type": "string", "example": "听风" },
+                          "description": { "type": "string" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/api/control": {
+      "post": {
+        "tags": ["Playlist"],
+        "summary": "切歌控制",
+        "description": "next: 下一首（允许越界至 len，触发后续 PLAYLIST_END）。prev: 上一首（最小值 0）。",
+        "parameters": [
+          {
+            "name": "action",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "enum": ["next", "prev"] },
+            "description": "next 或 prev"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "切歌成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string", "example": "Playback next" },
+                    "current_index": { "type": "integer", "example": 1 },
+                    "total": { "type": "integer", "example": 100 }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "action 非法或歌单为空", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+
+    "/api/current_status": {
+      "get": {
+        "tags": ["Query"],
+        "summary": "音箱状态轮询（用于屏幕显示歌名）",
+        "description": "返回当前歌曲的 title 和 artist。优先读本地缓存，缺失时回退显示 song_id。\n音箱建议每 2-5 秒轮询一次，服务端秒回无性能压力。",
+        "responses": {
+          "200": {
+            "description": "当前状态",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string", "enum": ["playing", "idle"], "example": "playing" },
+                    "title": { "type": "string", "example": "晴天" },
+                    "artist": { "type": "string", "example": "周杰伦" },
+                    "song_id": { "type": "string", "example": "228908" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/api/next_stream.opus": {
+      "get": {
+        "tags": ["Streaming"],
+        "summary": "【核心】音箱拉流端点 — 驱动自然切歌",
+        "description": "ESP32 音箱通过 HTTP GET 连接此端点获取 Opus 音频流。\n\n**自然切歌机制**：\n1. 服务端先锁定当前 song_id，再立刻将 DB 中的 current_index 自增 1。\n2. 流式返回 Opus 数据（缓存文件或 FFmpeg 实时转码）。\n3. 当一首歌播完，生成器自然结束，FastAPI 主动断开 TCP。\n4. 音箱底层检测到 TCP 断开 → 触发 DONE 事件 → 自动请求本端点取下一首。\n\n**边界处理**：\n- 若 current_index >= 歌单长度，返回 HTTP 404（detail: PLAYLIST_END），音箱应进入静默待机。\n- 音箱应在收到 404 PLAYLIST_END 后停止轮询拉流，等待 set_playlist 或 insert_song 后重试。\n\n**流格式**：\n- 容器：Ogg\n- 编码：Opus\n- 采样率：48000 Hz\n- 声道：1（单声道，适配 ESP32-S3 单喇叭）\n- 码率：约 80kbps VBR\n- 分块大小：4096 字节\n\n**重试策略**（端侧建议）：\n- HTTP 404 PLAYLIST_END：停止拉流，等待新歌单。\n- HTTP 503（FFmpeg 不可用）：等待 2 秒重试，最多 3 次。\n- TCP 连接异常断开：等待 500ms 重连一次，若仍失败则记录错误并待机。",
+        "responses": {
+          "200": {
+            "description": "Opus 音频流",
+            "headers": {
+              "X-Song-Id": { "schema": { "type": "string" }, "description": "当前播放的歌曲 ID" },
+              "X-Stream-Mode": { "schema": { "type": "string", "enum": ["cache", "live"] }, "description": "cache=预转码文件, live=FFmpeg实时转码" }
+            },
+            "content": {
+              "audio/ogg": {
+                "schema": { "type": "string", "format": "binary", "description": "Ogg Opus 音频流" }
+              }
+            }
+          },
+          "404": {
+            "description": "PLAYLIST_END — 歌单已播完，音箱应静默待机",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "detail": { "type": "string", "example": "PLAYLIST_END" }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "FFmpeg 未安装 — 无法实时转码（仅 live 模式）",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
+        }
+      }
+    },
+
+    "/api/play/{song_id}.opus": {
+      "get": {
+        "tags": ["Streaming"],
+        "summary": "【调试/浏览器】单曲播放（无副作用）",
+        "description": "通过 song_id 直接流式播放一首歌，不修改歌单状态。适合浏览器直接打开试听或调试。\n流格式与 next_stream 相同。",
+        "parameters": [
+          {
+            "name": "song_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "歌曲 ID（从 current_status 可获取）"
+          }
+        ],
+        "responses": {
+          "200": { "description": "Opus 音频流", "content": { "audio/ogg": { "schema": { "type": "string", "format": "binary" } } } },
+          "400": { "description": "song_id 格式非法", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "404": { "description": "歌曲 URL 不可用", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "503": { "description": "FFmpeg 未安装", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+
+    "/api/health": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "健康检查",
+        "description": "用于 Docker healthcheck 或音箱连接检测。",
+        "responses": {
+          "200": {
+            "description": "服务正常",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string", "example": "ok" },
+                    "timestamp": { "type": "string", "format": "date-time", "example": "2026-06-25T00:38:46.918774" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+
+  "components": {
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "detail": { "type": "string", "example": "Song not found: 周杰伦 晴天" }
+        }
+      }
+    }
+  },
+
+  "x-speaker-pipeline": {
+    "description": "ESP32-S3 音箱拉流状态机建议",
+    "flow": [
+      { "state": "IDLE", "desc": "静默待机，定期 GET /api/health 检测服务存活" },
+      { "trigger": "用户/服务端设置歌单", "action": "POST /api/set_playlist 或 POST /api/insert_song", "next": "FETCHING" },
+      { "state": "FETCHING", "desc": "GET /api/next_stream.opus 拉流" },
+      { "response": "200 + audio/ogg", "action": "播放 Opus 流", "event": "DONE (TCP断开) → 重新 FETCHING" },
+      { "response": "404 PLAYLIST_END", "action": "切换到 IDLE 静默待机" },
+      { "response": "503", "action": "重试最多 3 次，间隔 2 秒；均失败则 IDLE" },
+      { "response": "连接错误", "action": "重试 1 次间隔 500ms；仍失败则 IDLE" }
+    ],
+    "display_polling": "每 2~5 秒 GET /api/current_status 刷新屏幕歌名/歌手"
+  }
+}
